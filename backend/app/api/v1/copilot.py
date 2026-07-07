@@ -1,4 +1,4 @@
-"""RM Copilot endpoint — Claude tool-use agent."""
+"""RM Copilot endpoint — multi-provider DVR agent with episodic memory."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -7,22 +7,40 @@ from sqlalchemy.orm import Session
 
 from ...agents.copilot import ask_copilot
 from ...db import get_session
+from ...config import get_settings
 from ...models.prospect import Prospect
 from ...models.interaction_log import ProspectInteractionLog
+from ...models.copilot_memory import CopilotMemory
 from ...scoring.scorer import compute_lead_score
 from ...scoring.weights import SCORE_VERSION
 
 router = APIRouter(prefix="/copilot", tags=["copilot"])
+settings = get_settings()
+
+_MEMORY_WINDOW = 6  # inject last N turns as context
 
 
 class CopilotRequest(BaseModel):
     question: str
     rm_id: str = ""
+    prospect_id: str = ""   # optional focus prospect
 
 
 class CopilotResponse(BaseModel):
     answer: str
-    model_used: str
+    provider: str
+    memory_turns_used: int
+
+
+class MemoryEntry(BaseModel):
+    role: str
+    content: str
+    created_at: str
+
+
+class MemoryHistory(BaseModel):
+    prospect_id: str
+    history: list[MemoryEntry]
 
 
 @router.post("/ask", response_model=CopilotResponse)
@@ -57,22 +75,61 @@ def ask(body: CopilotRequest, session: Session = Depends(get_session)):
             for c in result.contributions
         ]
 
-    from ...config import get_settings
-    settings = get_settings()
-    model_used = settings.copilot_model if settings.anthropic_api_key else "rule-based-fallback"
+    # --- Episodic memory: load last N turns ---
+    pid = body.prospect_id
+    history_rows = (
+        session.query(CopilotMemory)
+        .filter(CopilotMemory.prospect_id == pid)
+        .order_by(CopilotMemory.created_at.desc())
+        .limit(_MEMORY_WINDOW)
+        .all()
+    ) if pid else []
+    history_rows = list(reversed(history_rows))
+    history = [{"role": r.role, "content": r.content} for r in history_rows]
 
-    answer = ask_copilot(body.question, prospect_lookup, contribution_lookup)
+    # --- Run copilot (DVR + multi-provider) ---
+    answer, provider = ask_copilot(
+        question=body.question,
+        prospect_lookup=prospect_lookup,
+        contribution_lookup=contribution_lookup,
+        history=history,
+        anthropic_api_key=settings.anthropic_api_key,
+        gemini_api_key=settings.gemini_api_key,
+        claude_model=settings.copilot_model,
+    )
 
-    # Log the copilot interaction
-    for pid in prospect_lookup:
-        if pid.lower() in body.question.lower():
+    # --- Persist to episodic memory ---
+    if pid:
+        session.add(CopilotMemory(prospect_id=pid, rm_id=body.rm_id, role="user", content=body.question, provider=""))
+        session.add(CopilotMemory(prospect_id=pid, rm_id=body.rm_id, role="assistant", content=answer, provider=provider))
+
+    # Log to interaction audit
+    for p_id in prospect_lookup:
+        if p_id.lower() in body.question.lower():
             session.add(ProspectInteractionLog(
-                prospect_id=pid, rm_id=body.rm_id,
+                prospect_id=p_id, rm_id=body.rm_id,
                 event_type="copilot_query",
                 event_detail=body.question[:500],
-                lead_score_snapshot=prospect_lookup[pid]["lead_score"],
+                lead_score_snapshot=prospect_lookup[p_id]["lead_score"],
                 score_version=SCORE_VERSION,
             ))
     session.commit()
 
-    return CopilotResponse(answer=answer, model_used=model_used)
+    return CopilotResponse(answer=answer, provider=provider, memory_turns_used=len(history))
+
+
+@router.get("/history/{prospect_id}", response_model=MemoryHistory)
+def memory_history(prospect_id: str, session: Session = Depends(get_session)):
+    rows = (
+        session.query(CopilotMemory)
+        .filter(CopilotMemory.prospect_id == prospect_id)
+        .order_by(CopilotMemory.created_at.asc())
+        .all()
+    )
+    return MemoryHistory(
+        prospect_id=prospect_id,
+        history=[
+            MemoryEntry(role=r.role, content=r.content, created_at=str(r.created_at))
+            for r in rows
+        ],
+    )
