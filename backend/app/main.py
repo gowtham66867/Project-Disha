@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .db import init_db, SessionLocal
 from .seed.loader import seed
@@ -49,11 +52,23 @@ app.include_router(pipeline.router, prefix="/api/v1")
 app.include_router(reengagement.router, prefix="/api/v1")
 
 
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/docs")
-
-
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "project-disha", "version": "2.0.0"}
+
+
+# Serve React frontend from /static dir (built by Dockerfile multi-stage)
+_STATIC = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+if os.path.isdir(_STATIC):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_STATIC, "assets")), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str = ""):
+        # API routes handled above; everything else → index.html
+        index = os.path.join(_STATIC, "index.html")
+        return FileResponse(index)
+else:
+    @app.get("/", include_in_schema=False)
+    def root():
+        return RedirectResponse(url="/docs")
