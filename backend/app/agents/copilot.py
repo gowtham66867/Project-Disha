@@ -140,7 +140,13 @@ def _fallback_answer(question: str, prospect_lookup: dict) -> str:
             )
     first = next(iter(prospect_lookup.values()), None)
     if first:
-        return _fallback_answer(question, {first["prospect_id"]: first})
+        p = first
+        return (
+            f"Prospect {p.get('prospect_id')} ({p.get('name')}) scored "
+            f"{p.get('lead_score', 0):.1f}/100 ({p.get('lead_band', '')}).\n"
+            f"Recommended: {p.get('recommended_channel', '')} — "
+            f"pitch {p.get('recommended_product', '')} {p.get('recommended_timing', 'soon')}."
+        )
     return "I don't have enough information to answer that."
 
 
