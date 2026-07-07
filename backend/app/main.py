@@ -58,16 +58,17 @@ def health():
 
 
 # Serve React frontend from /static dir (built by Dockerfile multi-stage)
-_STATIC = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+_STATIC = os.path.join(os.path.dirname(__file__), "..", "static")
 if os.path.isdir(_STATIC):
     app.mount("/assets", StaticFiles(directory=os.path.join(_STATIC, "assets")), name="assets")
 
     @app.get("/", include_in_schema=False)
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa(full_path: str = ""):
-        # API routes handled above; everything else → index.html
-        index = os.path.join(_STATIC, "index.html")
-        return FileResponse(index)
+        if full_path.startswith(("api/", "docs", "redoc", "openapi", "health")):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404)
+        return FileResponse(os.path.join(_STATIC, "index.html"))
 else:
     @app.get("/", include_in_schema=False)
     def root():
